@@ -112,6 +112,12 @@ tmux-schema
 tmux-schema --only work
 ```
 
+## Alternatives
+
+tmux-schema is intentionally minimal — a single bash script, a simple YAML file, no plugins. It's a good fit if you want a declarative way to spin up a known set of sessions and don't need much else.
+
+If you're looking for something more featureful — like automatic session saving/restoring, persisting pane contents, or surviving server restarts — take a look at [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect).
+
 ## Attribution
 
 Authored by @claude, guided by @pmccarren
