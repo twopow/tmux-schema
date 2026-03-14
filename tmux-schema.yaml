@@ -1,0 +1,24 @@
+sessions:
+  - name: work
+    windows:
+      - name: projects
+        dir: ~/projects
+      - name: split-view
+        dir: ~/projects
+        layout:
+          split: vertical
+          left:
+          right:
+            split: horizontal
+            top:
+            bottom:
+
+  - name: play
+    windows:
+      - name: play
+        dir: ~/play
+        layout:
+          split: vertical
+          left:
+          right:
+            dir: ~/play/sandbox

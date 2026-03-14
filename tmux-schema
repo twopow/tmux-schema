@@ -1,0 +1,364 @@
+#!/usr/bin/env bash
+#
+# tmux-schema — Bootstrap tmux sessions from a YAML configuration file.
+#
+# Usage:
+#   tmux-schema [--file <path>] [--only <name>] [--attach] [--dry-run] [--help]
+#
+# Options:
+#   --file <path>   Path to YAML schema file (default: ./tmux-schema.yaml,
+#                   then ~/.tmux-schema.yaml)
+#   --only <name>   Only create the named session (can be repeated)
+#   --attach        Force attach to first session even if sessions already existed
+#   --dry-run       Print tmux commands without executing
+#   --help          Show this help message
+#
+# Requires: bash, tmux, yq (https://github.com/mikefarah/yq)
+#
+# Example YAML schema:
+#
+# sessions:
+#   - name: work
+#     windows:
+#       - name: projects
+#         dir: ~/projects
+#       - name: split-view
+#         dir: ~/projects
+#         layout:
+#           split: vertical
+#           left:
+#           right:
+#             split: horizontal
+#             top:
+#             bottom:
+#
+#   - name: play
+#     windows:
+#       - name: play
+#         dir: ~/play
+#         layout:
+#           split: vertical
+#           left:
+#           right:
+#             dir: ~/play/sandbox
+#
+# Each window has a "dir" — the default working directory for all its panes.
+# Panes inherit it unless they specify their own "dir".
+# Leaf panes can be left empty (null) to use the window default.
+#
+# Authored by @claude, guided by @pmccarren
+#
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Globals
+# ---------------------------------------------------------------------------
+DRY_RUN=0
+ATTACH=0
+SCHEMA_FILE=""
+ONLY_SESSIONS=()
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+die() { echo "tmux-schema: error: $*" >&2; exit 1; }
+warn() { echo "tmux-schema: warning: $*" >&2; }
+
+usage() {
+  awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>2 {exit}' "$0"
+  exit 0
+}
+
+# Run or print a tmux command depending on --dry-run
+run_tmux() {
+  if (( DRY_RUN )); then
+    echo "  tmux $*"
+  else
+    tmux "$@"
+  fi
+}
+
+# Query the schema file with yq. Caller provides a yq expression.
+yq_get() {
+  yq -r "$1" "$SCHEMA_FILE"
+}
+
+# Expand ~ and env vars in a directory path, then validate it exists.
+resolve_dir() {
+  local raw="$1"
+  if [[ "$raw" == "~"* ]]; then
+    raw="${HOME}${raw#\~}"
+  fi
+  raw=$(eval echo "$raw" 2>/dev/null) || true
+  if [[ ! -d "$raw" ]] && (( ! DRY_RUN )); then
+    warn "directory does not exist: $raw — falling back to $HOME"
+    raw="$HOME"
+  fi
+  echo "$raw"
+}
+
+# ---------------------------------------------------------------------------
+# Layout tree walker
+# ---------------------------------------------------------------------------
+# apply_layout <yq_path> <target_pane_id> <default_dir>
+#
+# A node is a leaf if it is null, empty, or has no "split" key.
+# Leaf panes inherit the window's dir unless they specify their own.
+apply_layout() {
+  local yq_path="$1"
+  local pane_id="$2"
+  local default_dir="$3"
+
+  # Check what kind of node this is
+  local node_tag
+  node_tag=$(yq_get "${yq_path} | tag")
+
+  # Null or missing node — treat as leaf with default dir
+  if [[ "$node_tag" == "!!null" ]]; then
+    if [[ -n "$default_dir" ]]; then
+      local dir
+      dir=$(resolve_dir "$default_dir")
+      run_tmux send-keys -t "$pane_id" "cd $(printf '%q' "$dir") && clear" Enter
+    fi
+    return
+  fi
+
+  local has_split
+  has_split=$(yq_get "${yq_path}.split // \"\"")
+
+  # Leaf node: no split key — use explicit dir or fall back to default
+  if [[ -z "$has_split" ]]; then
+    local has_dir
+    has_dir=$(yq_get "${yq_path}.dir // \"\"")
+    local dir_raw="${has_dir:-$default_dir}"
+    if [[ -n "$dir_raw" ]]; then
+      local dir
+      dir=$(resolve_dir "$dir_raw")
+      run_tmux send-keys -t "$pane_id" "cd $(printf '%q' "$dir") && clear" Enter
+    fi
+    return
+  fi
+
+  # Split node
+  local tmux_flag child_a_path child_b_path
+
+  if [[ "$has_split" == "vertical" ]]; then
+    tmux_flag="-h"  # tmux -h = side-by-side = "vertical" in schema terms
+    child_a_path="${yq_path}.left"
+    child_b_path="${yq_path}.right"
+  elif [[ "$has_split" == "horizontal" ]]; then
+    tmux_flag="-v"  # tmux -v = stacked = "horizontal" in schema terms
+    child_a_path="${yq_path}.top"
+    child_b_path="${yq_path}.bottom"
+  else
+    die "unknown split direction: $has_split (expected 'vertical' or 'horizontal')"
+  fi
+
+  # Split the pane — second child gets the new pane
+  local new_pane_id
+  if (( DRY_RUN )); then
+    echo "  tmux split-window $tmux_flag -t $pane_id -P -F '#{pane_id}' -d"
+    new_pane_id="%dry-run"
+  else
+    new_pane_id=$(tmux split-window $tmux_flag -t "$pane_id" -P -F '#{pane_id}' -d)
+  fi
+
+  # Recurse: first child keeps the original pane, second child gets new pane
+  apply_layout "$child_a_path" "$pane_id" "$default_dir"
+  apply_layout "$child_b_path" "$new_pane_id" "$default_dir"
+}
+
+# ---------------------------------------------------------------------------
+# Session builder
+# ---------------------------------------------------------------------------
+build_session() {
+  local s="$1"
+  local session_name
+  session_name=$(yq_get ".sessions[${s}].name")
+
+  # Check if session already exists
+  if (( ! DRY_RUN )) && tmux has-session -t "=$session_name" 2>/dev/null; then
+    warn "session '$session_name' already exists — skipping"
+    return 1
+  fi
+
+  local num_windows
+  num_windows=$(yq_get ".sessions[${s}].windows | length")
+
+  echo "Creating session: $session_name ($num_windows window(s))"
+
+  # Create session with first window
+  local first_window_name
+  first_window_name=$(yq_get ".sessions[${s}].windows[0].name")
+
+  run_tmux new-session -d -s "$session_name" -n "$first_window_name"
+
+  # Apply layout/dir to first window
+  local first_win_dir first_layout_exists
+  first_win_dir=$(yq_get ".sessions[${s}].windows[0].dir // \"\"")
+  first_layout_exists=$(yq_get ".sessions[${s}].windows[0].layout // \"\"")
+  local first_pane_id
+  if (( DRY_RUN )); then
+    first_pane_id="%dry-run"
+  else
+    first_pane_id=$(tmux list-panes -t "${session_name}:${first_window_name}" -F '#{pane_id}' | head -1)
+  fi
+  if [[ -n "$first_layout_exists" ]]; then
+    apply_layout ".sessions[${s}].windows[0].layout" "$first_pane_id" "$first_win_dir"
+  elif [[ -n "$first_win_dir" ]]; then
+    # No layout, just a single pane — cd into the window dir
+    local dir
+    dir=$(resolve_dir "$first_win_dir")
+    run_tmux send-keys -t "$first_pane_id" "cd $(printf '%q' "$dir") && clear" Enter
+  fi
+
+  # Create remaining windows
+  local w
+  for (( w = 1; w < num_windows; w++ )); do
+    local win_name
+    win_name=$(yq_get ".sessions[${s}].windows[${w}].name")
+
+    run_tmux new-window -t "$session_name" -n "$win_name" -d
+
+    local win_dir layout_exists
+    win_dir=$(yq_get ".sessions[${s}].windows[${w}].dir // \"\"")
+    layout_exists=$(yq_get ".sessions[${s}].windows[${w}].layout // \"\"")
+    local pane_id
+    if (( DRY_RUN )); then
+      pane_id="%dry-run"
+    else
+      pane_id=$(tmux list-panes -t "${session_name}:${win_name}" -F '#{pane_id}' | head -1)
+    fi
+    if [[ -n "$layout_exists" ]]; then
+      apply_layout ".sessions[${s}].windows[${w}].layout" "$pane_id" "$win_dir"
+    elif [[ -n "$win_dir" ]]; then
+      local dir
+      dir=$(resolve_dir "$win_dir")
+      run_tmux send-keys -t "$pane_id" "cd $(printf '%q' "$dir") && clear" Enter
+    fi
+  done
+
+  # Select first window, first pane
+  run_tmux select-window -t "${session_name}:${first_window_name}"
+  run_tmux select-pane -t "${session_name}:${first_window_name}.0"
+
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+main() {
+  # Parse args
+  while (( $# )); do
+    case "$1" in
+      --file)   SCHEMA_FILE="$2"; shift 2 ;;
+      --only)   ONLY_SESSIONS+=("$2"); shift 2 ;;
+      --attach) ATTACH=1; shift ;;
+      --dry-run) DRY_RUN=1; shift ;;
+      --help|-h) usage ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  # Resolve schema file
+  if [[ -z "$SCHEMA_FILE" ]]; then
+    if [[ -f "./tmux-schema.yaml" ]]; then
+      SCHEMA_FILE="./tmux-schema.yaml"
+    elif [[ -f "$HOME/.tmux-schema.yaml" ]]; then
+      SCHEMA_FILE="$HOME/.tmux-schema.yaml"
+    else
+      die "no schema file found — provide one with --file or create ./tmux-schema.yaml"
+    fi
+  fi
+
+  [[ -f "$SCHEMA_FILE" ]] || die "schema file not found: $SCHEMA_FILE"
+
+  # Check dependencies
+  command -v tmux >/dev/null 2>&1 || die "tmux is not installed"
+  command -v yq >/dev/null 2>&1 || die "yq is not installed (https://github.com/mikefarah/yq)"
+
+  # Validate basic structure
+  local sessions_type
+  sessions_type=$(yq_get '.sessions | tag')
+  [[ "$sessions_type" == "!!seq" ]] || die "schema must have a top-level 'sessions' list"
+
+  echo "Loading schema: $SCHEMA_FILE"
+
+  local num_sessions
+  num_sessions=$(yq_get '.sessions | length')
+
+  if (( num_sessions == 0 )); then
+    die "no sessions defined in schema"
+  fi
+
+  # Determine tmux state
+  local inside_tmux=0
+  local server_running=0
+
+  if [[ -n "${TMUX:-}" ]]; then
+    inside_tmux=1
+    server_running=1
+  elif tmux list-sessions >/dev/null 2>&1; then
+    server_running=1
+  fi
+
+  # Build sessions
+  local created_any=0
+  local first_created=""
+  local s
+  for (( s = 0; s < num_sessions; s++ )); do
+    # Filter by --only if specified
+    if (( ${#ONLY_SESSIONS[@]} > 0 )); then
+      local session_name match=0
+      session_name=$(yq_get ".sessions[${s}].name")
+      for only in "${ONLY_SESSIONS[@]}"; do
+        if [[ "$session_name" == "$only" ]]; then
+          match=1
+          break
+        fi
+      done
+      (( match )) || continue
+    fi
+
+    if build_session "$s"; then
+      created_any=1
+      if [[ -z "$first_created" ]]; then
+        first_created=$(yq_get ".sessions[${s}].name")
+      fi
+    fi
+  done
+
+  if (( ! created_any )) && (( ! ATTACH )); then
+    echo "All sessions already exist — nothing to do."
+    return 0
+  fi
+
+  # Attach / switch logic
+  local target="${first_created:-$(yq_get '.sessions[0].name')}"
+  local should_attach=0
+
+  if (( inside_tmux )); then
+    # Inside tmux — always switch to the target session
+    should_attach=1
+  elif (( created_any && ! server_running )); then
+    # We just started the server — must attach
+    should_attach=1
+  elif (( ATTACH )); then
+    # Explicit --attach flag
+    should_attach=1
+  fi
+
+  if (( should_attach )); then
+    if (( inside_tmux )); then
+      run_tmux switch-client -t "$target"
+    else
+      run_tmux attach-session -t "$target"
+    fi
+  else
+    echo "Sessions created. Use 'tmux attach -t $target' to attach."
+  fi
+}
+
+main "$@"
