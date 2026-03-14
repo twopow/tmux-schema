@@ -43,8 +43,9 @@
 #             dir: ~/play/sandbox
 #
 # Each window has a "dir" — the default working directory for all its panes.
-# Panes inherit it unless they specify their own "dir".
-# Leaf panes can be left empty (null) to use the window default.
+# Each window can also have a "cmd" — a command typed into each pane on creation.
+# Panes inherit both unless they specify their own "dir" or "cmd".
+# Leaf panes can be left empty (null) to use the window defaults.
 #
 # Authored by @claude, guided by @pmccarren
 #
@@ -99,44 +100,56 @@ resolve_dir() {
 }
 
 # ---------------------------------------------------------------------------
+# Pane setup
+# ---------------------------------------------------------------------------
+# apply_leaf <pane_id> <dir> <cmd>
+apply_leaf() {
+  local pane_id="$1"
+  local dir_raw="$2"
+  local cmd="${3:-}"
+
+  if [[ -n "$dir_raw" ]]; then
+    local dir
+    dir=$(resolve_dir "$dir_raw")
+    run_tmux send-keys -t "$pane_id" "cd $(printf '%q' "$dir") && clear" Enter
+  fi
+  if [[ -n "$cmd" ]]; then
+    run_tmux send-keys -t "$pane_id" "$cmd" Enter
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Layout tree walker
 # ---------------------------------------------------------------------------
-# apply_layout <yq_path> <target_pane_id> <default_dir>
+# apply_layout <yq_path> <target_pane_id> <default_dir> <default_cmd>
 #
 # A node is a leaf if it is null, empty, or has no "split" key.
-# Leaf panes inherit the window's dir unless they specify their own.
+# Leaf panes inherit the window's dir/cmd unless they specify their own.
 apply_layout() {
   local yq_path="$1"
   local pane_id="$2"
   local default_dir="$3"
+  local default_cmd="${4:-}"
 
   # Check what kind of node this is
   local node_tag
   node_tag=$(yq_get "${yq_path} | tag")
 
-  # Null or missing node — treat as leaf with default dir
+  # Null or missing node — treat as leaf with defaults
   if [[ "$node_tag" == "!!null" ]]; then
-    if [[ -n "$default_dir" ]]; then
-      local dir
-      dir=$(resolve_dir "$default_dir")
-      run_tmux send-keys -t "$pane_id" "cd $(printf '%q' "$dir") && clear" Enter
-    fi
+    apply_leaf "$pane_id" "$default_dir" "$default_cmd"
     return
   fi
 
   local has_split
   has_split=$(yq_get "${yq_path}.split // \"\"")
 
-  # Leaf node: no split key — use explicit dir or fall back to default
+  # Leaf node: no split key — use explicit dir/cmd or fall back to defaults
   if [[ -z "$has_split" ]]; then
-    local has_dir
+    local has_dir has_cmd
     has_dir=$(yq_get "${yq_path}.dir // \"\"")
-    local dir_raw="${has_dir:-$default_dir}"
-    if [[ -n "$dir_raw" ]]; then
-      local dir
-      dir=$(resolve_dir "$dir_raw")
-      run_tmux send-keys -t "$pane_id" "cd $(printf '%q' "$dir") && clear" Enter
-    fi
+    has_cmd=$(yq_get "${yq_path}.cmd // \"\"")
+    apply_leaf "$pane_id" "${has_dir:-$default_dir}" "${has_cmd:-$default_cmd}"
     return
   fi
 
@@ -165,8 +178,8 @@ apply_layout() {
   fi
 
   # Recurse: first child keeps the original pane, second child gets new pane
-  apply_layout "$child_a_path" "$pane_id" "$default_dir"
-  apply_layout "$child_b_path" "$new_pane_id" "$default_dir"
+  apply_layout "$child_a_path" "$pane_id" "$default_dir" "$default_cmd"
+  apply_layout "$child_b_path" "$new_pane_id" "$default_dir" "$default_cmd"
 }
 
 # ---------------------------------------------------------------------------
@@ -194,9 +207,10 @@ build_session() {
 
   run_tmux new-session -d -s "$session_name" -n "$first_window_name"
 
-  # Apply layout/dir to first window
-  local first_win_dir first_layout_exists
+  # Apply layout/dir/cmd to first window
+  local first_win_dir first_win_cmd first_layout_exists
   first_win_dir=$(yq_get ".sessions[${s}].windows[0].dir // \"\"")
+  first_win_cmd=$(yq_get ".sessions[${s}].windows[0].cmd // \"\"")
   first_layout_exists=$(yq_get ".sessions[${s}].windows[0].layout // \"\"")
   local first_pane_id
   if (( DRY_RUN )); then
@@ -205,12 +219,9 @@ build_session() {
     first_pane_id=$(tmux list-panes -t "${session_name}:${first_window_name}" -F '#{pane_id}' | head -1)
   fi
   if [[ -n "$first_layout_exists" ]]; then
-    apply_layout ".sessions[${s}].windows[0].layout" "$first_pane_id" "$first_win_dir"
-  elif [[ -n "$first_win_dir" ]]; then
-    # No layout, just a single pane — cd into the window dir
-    local dir
-    dir=$(resolve_dir "$first_win_dir")
-    run_tmux send-keys -t "$first_pane_id" "cd $(printf '%q' "$dir") && clear" Enter
+    apply_layout ".sessions[${s}].windows[0].layout" "$first_pane_id" "$first_win_dir" "$first_win_cmd"
+  else
+    apply_leaf "$first_pane_id" "$first_win_dir" "$first_win_cmd"
   fi
 
   # Create remaining windows
@@ -221,8 +232,9 @@ build_session() {
 
     run_tmux new-window -t "$session_name" -n "$win_name" -d
 
-    local win_dir layout_exists
+    local win_dir win_cmd layout_exists
     win_dir=$(yq_get ".sessions[${s}].windows[${w}].dir // \"\"")
+    win_cmd=$(yq_get ".sessions[${s}].windows[${w}].cmd // \"\"")
     layout_exists=$(yq_get ".sessions[${s}].windows[${w}].layout // \"\"")
     local pane_id
     if (( DRY_RUN )); then
@@ -231,11 +243,9 @@ build_session() {
       pane_id=$(tmux list-panes -t "${session_name}:${win_name}" -F '#{pane_id}' | head -1)
     fi
     if [[ -n "$layout_exists" ]]; then
-      apply_layout ".sessions[${s}].windows[${w}].layout" "$pane_id" "$win_dir"
-    elif [[ -n "$win_dir" ]]; then
-      local dir
-      dir=$(resolve_dir "$win_dir")
-      run_tmux send-keys -t "$pane_id" "cd $(printf '%q' "$dir") && clear" Enter
+      apply_layout ".sessions[${s}].windows[${w}].layout" "$pane_id" "$win_dir" "$win_cmd"
+    else
+      apply_leaf "$pane_id" "$win_dir" "$win_cmd"
     fi
   done
 

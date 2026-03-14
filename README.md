@@ -33,6 +33,7 @@ sessions:
           right:
             split: horizontal
             top:
+              cmd: git status
             bottom:
 
   - name: play
@@ -49,10 +50,11 @@ sessions:
 ### How it works
 
 - Each **window** has a `dir` — the default working directory for all its panes.
+- Each **window** can have a `cmd` — a command to run in each pane after it's created (as if you typed it in).
 - A **layout** defines how panes are split using a binary tree:
   - `split: vertical` creates a left/right split
   - `split: horizontal` creates a top/bottom split
-  - Leaf panes can be left empty (null) to inherit the window's `dir`, or specify their own `dir` to override it.
+  - Leaf panes can be left empty (null) to inherit the window's `dir` and `cmd`, or specify their own to override.
 
 ### Example: three-pane layout
 
@@ -77,6 +79,21 @@ layout:
     top:
     bottom:
 ```
+
+### Example: running commands in panes
+
+```yaml
+- name: dev
+  dir: ~/projects/myapp
+  cmd: git status
+  layout:
+    split: vertical
+    left:
+    right:
+      cmd: npm run dev
+```
+
+The left pane inherits both `dir` and `cmd` from the window — it opens in `~/projects/myapp` and runs `git status`. The right pane overrides `cmd` to run `npm run dev` instead, but still inherits the directory.
 
 ## Requirements
 

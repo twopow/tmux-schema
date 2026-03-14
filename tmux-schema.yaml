@@ -8,6 +8,7 @@ sessions:
         layout:
           split: vertical
           left:
+            cmd: echo world
           right:
             split: horizontal
             top:
@@ -17,8 +18,10 @@ sessions:
     windows:
       - name: play
         dir: ~/play
+        cmd: ls
         layout:
           split: vertical
           left:
           right:
             dir: ~/play/sandbox
+            cmd: echo hello
