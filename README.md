@@ -133,7 +133,10 @@ tmux-schema --only work
 
 tmux-schema is intentionally minimal — a single bash script, a simple YAML file, no plugins. It's a good fit if you want a declarative way to spin up a known set of sessions and don't need much else.
 
-If you're looking for something more featureful — like automatic session saving/restoring, persisting pane contents, or surviving server restarts — take a look at [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect).
+If you're looking for something more featureful:
+
+- [tmuxinator](https://github.com/tmuxinator/tmuxinator) — full-featured session manager with YAML configs, hooks, project templates, and more. Requires Ruby.
+- [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect) — automatic session saving/restoring, persists pane contents, survives server restarts.
 
 ## Attribution
 
