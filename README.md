@@ -135,8 +135,11 @@ tmux-schema is intentionally minimal — a single bash script, a simple YAML fil
 
 If you're looking for something more featureful:
 
-- [tmuxinator](https://github.com/tmuxinator/tmuxinator) — full-featured session manager with YAML configs, project templates, and more. Requires Ruby.
 - [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect) — automatic session saving/restoring, persists pane contents, survives server restarts.
+- [tmuxinator](https://github.com/tmuxinator/tmuxinator) — full-featured session manager with YAML configs, project templates, and more. Requires Ruby.
+- [tmuxp](https://github.com/tmux-python/tmuxp) — session manager with JSON/YAML configs and a Python API. Requires Python.
+- [smug](https://github.com/ivaaaan/smug) — session manager written in Go. Single binary, YAML configs.
+- [laio](https://github.com/ck3mp3r/laio-cli) — session manager written in Rust. Single binary, YAML configs.
 
 ## Attribution
 
